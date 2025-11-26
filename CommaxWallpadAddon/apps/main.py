@@ -56,6 +56,7 @@ class QueueItem(TypedDict):
     count: int
     expected_state: Optional[ExpectedStatePacket]
     received_count: int  # 예상 패킷 수신 횟수를 추적하기 위한 필드
+    first_sent: bool  # 첫 번째 전송 완료 여부
 
     
 class WallpadController:
@@ -93,6 +94,15 @@ class WallpadController:
         self.discovery_publisher = DiscoveryPublisher(self)
         self.state_updater = StateUpdater(self.STATE_TOPIC, self.publish_mqtt)
         self.is_available: bool = False
+
+    def send_command(self, packet_hex: str) -> None:
+        """명령을 즉시 EW11로 전송합니다."""
+        try:
+            cmd_bytes = bytes.fromhex(packet_hex)
+            self.publish_mqtt(f'{self.ELFIN_TOPIC}/send', cmd_bytes)
+            self.logger.debug(f"명령 즉시 전송: {packet_hex}")
+        except (ValueError, TypeError) as e:
+            self.logger.error(f"명령 전송 중 오류 발생: {str(e)}")
 
     def load_devices_and_packets_structures(self) -> None:
         """
@@ -431,27 +441,34 @@ class WallpadController:
             self.logger.error(f'기기 재시작 프로세스 전체 오류: {str(err)}')
 
     async def process_queue(self) -> None:
-        """큐에 있는 모든 명령을 처리하고 예상되는 응답을 확인합니다."""
+        """큐에 있는 명령의 재전송을 처리하고 예상되는 응답을 확인합니다.
+
+        첫 번째 전송은 add_to_queue()에서 즉시 처리되고,
+        이 함수는 재전송과 응답 확인만 담당합니다.
+        """
         max_send_count = self.max_send_count
         if not self.QUEUE:
             return
-        
+
         send_data = self.QUEUE.pop(0)
-        
-        try:
-            cmd_bytes = bytes.fromhex(send_data['sendcmd'])
-            self.publish_mqtt(f'{self.ELFIN_TOPIC}/send', cmd_bytes)
-            send_data['count'] += 1
-        except (ValueError, TypeError) as e:
-            self.logger.error(f"명령 전송 중 오류 발생: {str(e)}")
-            return
-            
+
+        # 첫 번째 전송이 아직 안 된 경우 (이전 버전 호환성)
+        if not send_data.get('first_sent', False):
+            try:
+                cmd_bytes = bytes.fromhex(send_data['sendcmd'])
+                self.publish_mqtt(f'{self.ELFIN_TOPIC}/send', cmd_bytes)
+                send_data['count'] += 1
+                send_data['first_sent'] = True
+            except (ValueError, TypeError) as e:
+                self.logger.error(f"명령 전송 중 오류 발생: {str(e)}")
+                return
+
         expected_state = send_data.get('expected_state')
-        if (isinstance(expected_state, dict)):
-            
+        if isinstance(expected_state, dict):
+
             required_bytes = expected_state['required_bytes']
             possible_values = expected_state['possible_values']
-            
+
             recv_data_set = self.COLLECTDATA['recent_recv_data']
             for received_packet in recv_data_set:
                 if not isinstance(received_packet, str):
@@ -472,37 +489,40 @@ class WallpadController:
                             self.logger.error(f"패킷 비교 중 오류 발생: {pos}는 바이트 배열의 길이보다 큽니다.")
                             match = False
                             break
-                            
+
                         if possible_values[pos]:
                             if byte_to_hex_str(received_bytes[pos]) not in possible_values[pos]:
                                 match = False
                                 break
-                            
+
                 except (IndexError, TypeError) as e:
                     self.logger.error(f"패킷 비교 중 오류 발생: {str(e)}")
                     match = False
-                    
+
                 if match:
                     send_data['received_count'] += 1
                     self.COLLECTDATA['recent_recv_data'] = set()
                     self.logger.debug(f"예상된 응답을 수신했습니다 ({send_data['received_count']}/{self.min_receive_count}): {received_packet}")
-                    
+
             if send_data['received_count'] >= self.min_receive_count:
                 return
-            
+
             if send_data['count'] < max_send_count:
-                self.logger.debug(f"명령 재전송 예약 (시도 {send_data['count']}/{max_send_count}): {send_data['sendcmd']}")
+                # 재전송
+                try:
+                    cmd_bytes = bytes.fromhex(send_data['sendcmd'])
+                    self.publish_mqtt(f'{self.ELFIN_TOPIC}/send', cmd_bytes)
+                    send_data['count'] += 1
+                    self.logger.debug(f"명령 재전송 (시도 {send_data['count']}/{max_send_count}): {send_data['sendcmd']}")
+                except (ValueError, TypeError) as e:
+                    self.logger.error(f"명령 재전송 중 오류 발생: {str(e)}")
                 self.QUEUE.insert(0, send_data)
             else:
                 self.logger.warning(f"최대 전송 횟수 초과. 응답을 받지 못했습니다: {send_data['sendcmd']}")
-                    
-        # 예상 상태 정보가 없거나 잘못된 경우 재전송 시도만 함.
+
+        # 예상 상태 정보가 없거나 잘못된 경우 - 첫 전송 후 완료
         else:
-            if send_data['count'] < max_send_count:
-                self.logger.debug(f"명령 전송 (횟수 {send_data['count']}/{max_send_count}): {send_data['sendcmd']}")
-                self.QUEUE.insert(0, send_data)
-        
-        await asyncio.sleep(0.05)
+            self.logger.debug(f"명령 전송 완료 (예상 상태 없음): {send_data['sendcmd']}")
 
     async def process_queue_and_monitor(self) -> None:
         """

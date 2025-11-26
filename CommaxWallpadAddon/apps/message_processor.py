@@ -513,22 +513,20 @@ class MessageProcessor:
                 packet_hex = checksum(packet_hex)
 
             if packet_hex:
+                # 즉시 첫 번째 전송 실행
+                self.controller.send_command(packet_hex)
+
                 expected_state = self.generate_expected_state_packet(packet_hex)
                 if expected_state:
                     self.logger.debug(f'예상 상태 패킷: {expected_state}')
+                    # 재전송을 위해 큐에 추가 (첫 전송은 이미 완료)
                     self.QUEUE.append({
-                        'sendcmd': packet_hex, 
-                        'count': 0, 
+                        'sendcmd': packet_hex,
+                        'count': 1,  # 이미 1회 전송됨
                         'expected_state': expected_state,
-                        'received_count': 0
+                        'received_count': 0,
+                        'first_sent': True
                     })
-                else:
-                    self.logger.debug('예상 상태 패킷 없음. 최대 전송 횟수만큼 전송합니다.')
-                    self.QUEUE.append({
-                        'sendcmd': packet_hex, 
-                        'count': 0, 
-                        'expected_state': None,
-                        'received_count': 0
-                    })
+                # 예상 상태 패킷이 없으면 재전송 불필요 (즉시 전송으로 완료)
         except Exception as e:
             self.logger.error(f"HA 명령 처리 중 오류 발생: {str(e)}") 
