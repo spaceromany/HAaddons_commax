@@ -17,6 +17,112 @@ class MessageProcessor:
         self.ELFIN_TOPIC = controller.ELFIN_TOPIC
         self.config = controller.config
 
+    def build_packet_sync(self, topics: List[str], value: str) -> Optional[str]:
+        """HA 명령으로부터 패킷을 동기적으로 생성합니다. (MQTT 콜백에서 직접 호출용)
+
+        Returns:
+            Optional[str]: 생성된 패킷 hex 문자열 또는 None
+        """
+        try:
+            device = ''.join(re.findall('[a-zA-Z]', topics[1]))
+            device_id = int(''.join(re.findall('[0-9]', topics[1])))
+            action = topics[2]
+
+            if not isinstance(self.DEVICE_STRUCTURE, dict):
+                return None
+
+            if device not in self.DEVICE_STRUCTURE:
+                self.logger.error(f'장치 {device}가 DEVICE_STRUCTURE에 존재하지 않습니다.')
+                return None
+
+            packet_hex = None
+            packet = bytearray(7)
+            device_structure = self.DEVICE_STRUCTURE[device]
+            command = device_structure["command"]
+            field_positions = command["fieldPositions"]
+
+            packet[0] = int(device_structure["command"]["header"], 16)
+            packet[int(field_positions["deviceId"])] = device_id
+
+            if device == 'Light':
+                if action == 'power':
+                    power_value = command["structure"][str(field_positions["power"])]["values"]["on" if value == "ON" else "off"]
+                    packet[int(field_positions["power"])] = int(power_value, 16)
+            elif device == 'LightBreaker':
+                command_type_value = command["structure"][str(field_positions["commandType"])]["values"]["power"]
+                packet[int(field_positions["commandType"])] = int(command_type_value, 16)
+                power_value = command["structure"][str(field_positions["power"])]["values"]["on" if value == "ON" else "off"]
+                packet[int(field_positions["power"])] = int(power_value, 16)
+            elif device == 'Outlet':
+                if action == 'power':
+                    command_type_value = command["structure"][str(field_positions["commandType"])]["values"]["power"]
+                    packet[int(field_positions["commandType"])] = int(command_type_value, 16)
+                    power_value = command["structure"][str(field_positions["power"])]["values"]["on" if value == "ON" else "off"]
+                    packet[int(field_positions["power"])] = int(power_value, 16)
+                elif action == 'ecomode':
+                    command_type_value = command["structure"][str(field_positions["commandType"])]["values"]["ecomode"]
+                    packet[int(field_positions["commandType"])] = int(command_type_value, 16)
+                    power_value = command["structure"][str(field_positions["power"])]["values"]["on" if value == "ON" else "off"]
+                    packet[int(field_positions["power"])] = int(power_value, 16)
+                elif action == 'setCutoff':
+                    command_type_value = command["structure"][str(field_positions["commandType"])]["values"]["setCutoff"]
+                    packet[int(field_positions["commandType"])] = int(command_type_value, 16)
+                    packet[int(field_positions["cutoffValue"])] = int(value, 16)
+            elif device == 'Gas':
+                if value == "PRESS" or value == "ON":
+                    power_value = command["structure"][str(field_positions["power"])]["values"]["off"]
+                    packet[int(field_positions["power"])] = int(power_value, 16)
+            elif device == 'Thermo':
+                if action == 'power':
+                    if value == 'heat':
+                        packet_hex = self.make_climate_command(device_id, 0, 'commandON')
+                    else:
+                        packet_hex = self.make_climate_command(device_id, 0, 'commandOFF')
+                elif action == 'setTemp':
+                    try:
+                        set_temp = int(float(value))
+                        min_temp = int(self.config['climate_settings'].get('min_temp', 5))
+                        max_temp = int(self.config['climate_settings'].get('max_temp', 40))
+
+                        if not min_temp <= set_temp <= max_temp:
+                            self.logger.error(f"설정 온도가 허용 범위를 벗어났습니다: {set_temp}°C (허용범위: {min_temp}~{max_temp}°C)")
+                            return None
+                    except ValueError:
+                        self.logger.error(f"온도 값이 올바르지 않습니다: {value}")
+                        return None
+                    packet_hex = self.make_climate_command(device_id, set_temp, 'commandCHANGE')
+            elif device == 'Fan':
+                if action == 'power':
+                    command_type_value = command["structure"][str(field_positions["commandType"])]["values"]["power"]
+                    packet[int(field_positions["commandType"])] = int(command_type_value, 16)
+                    power_value = command["structure"][str(field_positions["value"])]["values"]["on" if value == "ON" else "off"]
+                    packet[int(field_positions["value"])] = int(power_value, 16)
+                elif action == 'speed':
+                    if value not in ["low", "medium", "high"]:
+                        self.logger.error(f"잘못된 팬 속도입니다: {value}")
+                        return None
+                    command_type_value = command["structure"][str(field_positions["commandType"])]["values"]["setSpeed"]
+                    packet[int(field_positions["commandType"])] = int(command_type_value, 16)
+                    value_value = command["structure"][str(field_positions["value"])]["values"][value]
+                    packet[int(field_positions["value"])] = int(value_value, 16)
+            elif device == 'EV':
+                if value == "PRESS" or value == "ON":
+                    packet[0] = int("A0", 16)
+                    packet[int(field_positions["power"])] = int(command["structure"][str(field_positions["power"])]["values"]["on"], 16)
+                    packet[int(field_positions["unknown1"])] = int(command["structure"][str(field_positions["unknown1"])]["values"]["fixed"], 16)
+                    packet[int(field_positions["unknown2"])] = int(command["structure"][str(field_positions["unknown2"])]["values"]["fixed"], 16)
+                    packet[int(field_positions["unknown3"])] = int(command["structure"][str(field_positions["unknown3"])]["values"]["fixed"], 16)
+
+            if packet_hex is None:
+                packet_hex = packet.hex().upper()
+                packet_hex = checksum(packet_hex)
+
+            return packet_hex
+
+        except Exception as e:
+            self.logger.error(f"패킷 생성 중 오류 발생: {str(e)}")
+            return None
+
     def make_climate_command(self, device_id: int, target_temp: int, command_type: str) -> Union[str, None]:
         """
         온도 조절기의 16진수 명령어를 생성하는 함수
@@ -513,8 +619,8 @@ class MessageProcessor:
                 packet_hex = checksum(packet_hex)
 
             if packet_hex:
-                # 즉시 첫 번째 전송 실행
-                self.controller.send_command(packet_hex)
+                # 첫 번째 전송은 on_mqtt_message에서 동기적으로 이미 완료됨
+                # 여기서는 재전송을 위한 큐 처리만 수행
 
                 expected_state = self.generate_expected_state_packet(packet_hex)
                 if expected_state:

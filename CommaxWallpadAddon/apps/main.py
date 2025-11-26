@@ -298,7 +298,18 @@ class WallpadController:
                 self.logger.debug(f'->> 수신: {"/".join(topics)} -> {value}')
                 # 웹서버에 메시지 추가
                 self.web_server.add_mqtt_message("/".join(topics), value)
-                
+
+                # 즉시 패킷 생성 및 전송 (asyncio 루프 대기 없이)
+                packet_hex = self.message_processor.build_packet_sync(topics, value)
+                if packet_hex:
+                    try:
+                        cmd_bytes = bytes.fromhex(packet_hex)
+                        self.mqtt_client.publish(f'{self.ELFIN_TOPIC}/send', cmd_bytes)
+                        self.logger.debug(f"명령 즉시 전송 (동기): {packet_hex}")
+                    except (ValueError, TypeError) as e:
+                        self.logger.error(f"명령 전송 중 오류 발생: {str(e)}")
+
+                # 큐 처리 (재전송/상태확인)는 비동기로
                 if self.loop and self.loop.is_running():
                     asyncio.run_coroutine_threadsafe(
                         self.message_processor.process_ha_command(topics, value),
