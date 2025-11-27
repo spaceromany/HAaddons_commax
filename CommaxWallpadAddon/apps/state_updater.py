@@ -5,6 +5,80 @@ class StateUpdater:
         self.STATE_TOPIC = ha_topic
         self.publish_mqtt = publish_mqtt_func
 
+    def update_light_sync(self, idx: int, onoff: str) -> None:
+        """동기 버전 - MQTT 콜백에서 직접 호출용"""
+        state = 'power'
+        deviceID = 'Light' + str(idx)
+        topic = self.STATE_TOPIC.format(deviceID, state)
+        self.publish_mqtt(topic, onoff)
+
+    def update_light_breaker_sync(self, idx: int, onoff: str) -> None:
+        """동기 버전 - MQTT 콜백에서 직접 호출용"""
+        state = 'power'
+        deviceID = 'LightBreaker' + str(idx)
+        topic = self.STATE_TOPIC.format(deviceID, state)
+        self.publish_mqtt(topic, onoff)
+
+    def update_temperature_sync(self, idx: int, mode_text: str, action_text: str, curTemp: int, setTemp: int) -> None:
+        """동기 버전 - MQTT 콜백에서 직접 호출용"""
+        deviceID = 'Thermo' + str(idx)
+        temperature = {
+            'curTemp': str(curTemp).zfill(2),
+            'setTemp': str(setTemp).zfill(2)
+        }
+        for state in temperature:
+            val = temperature[state]
+            topic = self.STATE_TOPIC.format(deviceID, state)
+            self.publish_mqtt(topic, val)
+
+        power_topic = self.STATE_TOPIC.format(deviceID, 'power')
+        action_topic = self.STATE_TOPIC.format(deviceID, 'action')
+        self.publish_mqtt(power_topic, mode_text)
+        self.publish_mqtt(action_topic, action_text)
+
+    def update_fan_sync(self, idx: int, power_text: str, speed_text: str) -> None:
+        """동기 버전 - MQTT 콜백에서 직접 호출용"""
+        deviceID = 'Fan' + str(idx)
+        if power_text == 'OFF':
+            topic = self.STATE_TOPIC.format(deviceID, 'power')
+            self.publish_mqtt(topic, 'OFF')
+        else:
+            topic = self.STATE_TOPIC.format(deviceID, 'speed')
+            self.publish_mqtt(topic, speed_text)
+            topic = self.STATE_TOPIC.format(deviceID, 'power')
+            self.publish_mqtt(topic, 'ON')
+
+    def update_outlet_sync(self, idx: int, power_text: str, watt: Union[float, None],
+                           cutoff: Union[int, None], is_eco: Union[bool, None]) -> None:
+        """동기 버전 - MQTT 콜백에서 직접 호출용"""
+        deviceID = 'Outlet' + str(idx)
+        topic = self.STATE_TOPIC.format(deviceID, 'power')
+        self.publish_mqtt(topic, power_text)
+        if is_eco is not None:
+            topic = self.STATE_TOPIC.format(deviceID, 'ecomode')
+            self.publish_mqtt(topic, 'ON' if is_eco else 'OFF')
+        if watt is not None:
+            topic = self.STATE_TOPIC.format(deviceID, 'watt')
+            self.publish_mqtt(topic, '%.1f' % watt)
+        if cutoff is not None:
+            topic = self.STATE_TOPIC.format(deviceID, 'cutoff')
+            self.publish_mqtt(topic, str(cutoff))
+
+    def update_gas_sync(self, idx: int, power_text: str) -> None:
+        """동기 버전 - MQTT 콜백에서 직접 호출용"""
+        deviceID = 'Gas' + str(idx)
+        topic = self.STATE_TOPIC.format(deviceID, 'power')
+        self.publish_mqtt(topic, power_text)
+
+    def update_ev_sync(self, idx: int, power_text: str, floor_text: str) -> None:
+        """동기 버전 - MQTT 콜백에서 직접 호출용"""
+        deviceID = 'EV' + str(idx)
+        if power_text == 'ON':
+            topic = self.STATE_TOPIC.format(deviceID, 'power')
+            self.publish_mqtt(topic, 'ON')
+            topic = self.STATE_TOPIC.format(deviceID, 'floor')
+            self.publish_mqtt(topic, floor_text)
+
     async def update_light(self, idx: int, onoff: str) -> None:
         state = 'power'
         deviceID = 'Light' + str(idx)

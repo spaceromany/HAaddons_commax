@@ -267,18 +267,15 @@ class WallpadController:
             
             if topics[0] == self.ELFIN_TOPIC:
                 if topics[1] == 'recv':
-                    self.elfin_reboot_count = 0            
+                    self.elfin_reboot_count = 0
                     if not self.is_available:
                         # 통신이 정상이고 offline 상태일 때 online으로 변경
                         self.publish_mqtt(f"{self.HA_TOPIC}/status", "online", retain=True)
                         self.is_available = True
                     raw_data = msg.payload.hex().upper()
                     self.logger.signal(f'->> 수신: {raw_data}')
-                    if self.loop and self.loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
-                            self.message_processor.process_elfin_data(raw_data),
-                            self.loop
-                        )
+                    # 즉시 상태 업데이트 (asyncio 루프 대기 없이)
+                    self.message_processor.process_elfin_data_sync(raw_data)
                     current_time = time.time_ns()
                     self.COLLECTDATA['last_recv_time'] = current_time
                     # 웹서버에 메시지 추가

@@ -361,11 +361,12 @@ class MessageProcessor:
                             f"command_structure: {command_structure}")
             return None
 
-    async def process_elfin_data(self, raw_data: str) -> None:
-        """Elfin 장치에서 전송된 raw_data를 분석합니다."""
+    def process_elfin_data_sync(self, raw_data: str) -> None:
+        """Elfin 장치에서 전송된 raw_data를 동기적으로 분석합니다. (MQTT 콜백에서 직접 호출용)"""
         try:
-            assert isinstance(self.DEVICE_STRUCTURE, dict), "DEVICE_STRUCTURE must be a dictionary"
-            
+            if not isinstance(self.DEVICE_STRUCTURE, dict):
+                return
+
             for k in range(0, len(raw_data), 16):
                 data = raw_data[k:k + 16]
                 if data == checksum(data):
@@ -373,9 +374,139 @@ class MessageProcessor:
                     self.COLLECTDATA['recent_recv_data'].add(data)
                     if len(self.COLLECTDATA['recv_data']) > 300:
                         self.COLLECTDATA['recv_data'] = self.COLLECTDATA['recv_data'][-300:]
-                    
+
                     byte_data = bytearray.fromhex(data)
-                    
+
+                    for device_name, structure in self.DEVICE_STRUCTURE.items():
+                        state_structure = structure['state']
+                        field_positions = state_structure['fieldPositions']
+                        if byte_data[0] == int(state_structure['header'], 16):
+                            try:
+                                device_id_pos = field_positions['deviceId']
+                                device_id = byte_data[int(device_id_pos)]
+                            except KeyError:
+                                if device_name == 'Gas':
+                                    power_pos = field_positions.get('power', 1)
+                                    power = byte_data[int(power_pos)]
+                                    power_hex = byte_to_hex_str(power)
+                                    power_values = state_structure['structure'][power_pos]['values']
+                                    power_text = "ON" if power_hex == power_values.get('on', '').upper() else "OFF"
+                                    self.logger.signal(f'{byte_data.hex()}: 가스차단기 ### 상태: {power_text}')
+                                    self.controller.state_updater.update_gas_sync(1, power_text)
+                                break
+                            except IndexError:
+                                self.logger.error(f"{device_name}의 deviceId 위치({device_id_pos})가 패킷 범위를 벗어났습니다.")
+                                break
+
+                            if device_name == 'Thermo':
+                                power_pos = field_positions.get('power', 1)
+                                power = byte_data[int(power_pos)]
+                                current_temp = int(format(byte_data[int(field_positions.get('currentTemp', 3))], '02x'))
+                                target_temp = int(format(byte_data[int(field_positions.get('targetTemp', 4))], '02x'))
+                                power_hex = byte_to_hex_str(power)
+                                power_values = state_structure['structure'][power_pos]['values']
+                                power_off_hex = power_values.get('off', '').upper()
+                                power_heating_hex = power_values.get('heating', '').upper()
+                                mode_text = 'off' if power_hex == power_off_hex else 'heat'
+                                action_text = 'heating' if power_hex == power_heating_hex else 'idle'
+                                self.logger.signal(f'{byte_data.hex()}: 온도조절기 ### {device_id}번, 모드: {mode_text}, 현재 온도: {current_temp}°C, 설정 온도: {target_temp}°C')
+                                self.controller.state_updater.update_temperature_sync(device_id, mode_text, action_text, current_temp, target_temp)
+
+                            elif device_name == 'Light':
+                                power_pos = field_positions.get('power', 1)
+                                power = byte_data[int(power_pos)]
+                                power_values = state_structure['structure'][power_pos]['values']
+                                power_hex = byte_to_hex_str(power)
+                                state = "ON" if power_hex == power_values.get('on', '').upper() else "OFF"
+                                self.logger.signal(f'{byte_data.hex()}: 조명 ### {device_id}번, 상태: {state}')
+                                self.controller.state_updater.update_light_sync(device_id, state)
+
+                            elif device_name == 'LightBreaker':
+                                power_pos = field_positions.get('power', 1)
+                                power = byte_data[int(power_pos)]
+                                power_values = state_structure['structure'][power_pos]['values']
+                                power_hex = byte_to_hex_str(power)
+                                state = "ON" if power_hex == power_values.get('on', '').upper() else "OFF"
+                                self.logger.signal(f'{byte_data.hex()}: 조명차단기 ### {device_id}번, 상태: {state}')
+                                self.controller.state_updater.update_light_breaker_sync(device_id, state)
+
+                            elif device_name == 'Outlet':
+                                power_pos = field_positions.get('power', 1)
+                                power = byte_data[int(power_pos)]
+                                power_values = state_structure['structure'][power_pos]['values']
+                                power_hex = byte_to_hex_str(power)
+                                power_text = "ON" if power_hex in [power_values.get('on', '').upper(), power_values.get('on_with_eco', '').upper()] else "OFF"
+                                is_eco = power_hex in [power_values.get('on_with_eco', '').upper(), power_values.get('off_with_eco', '').upper()]
+                                state_type_pos = field_positions.get('stateType', 3)
+                                state_type = byte_data[int(state_type_pos)]
+                                state_type_values = state_structure['structure'][state_type_pos]['values']
+                                state_type_hex = byte_to_hex_str(state_type)
+                                state_type_text = 'wattage' if state_type_hex in [state_type_values.get('wattage', '')] else 'ecomode'
+
+                                wattage_scailing_factor = float(state_structure.get("wattage_scailing_factor", 0.1)) or 0.1
+                                ecomode_scailing_factor = float(state_structure.get("ecomode_scailing_factor", 1)) or 1
+
+                                consecutive_bytes = byte_data[4:7]
+                                try:
+                                    watt = int(consecutive_bytes.hex())
+                                except ValueError:
+                                    watt = 0
+
+                                if state_type_text == 'wattage':
+                                    self.logger.signal(f'{byte_data.hex()}: 콘센트 ### {device_id}번, 상태: {power_text}, 전력: {watt} x {wattage_scailing_factor}W')
+                                    self.controller.state_updater.update_outlet_sync(device_id, power_text, watt * wattage_scailing_factor, None, is_eco)
+                                elif state_type_text == 'ecomode':
+                                    self.logger.signal(f'{byte_data.hex()}: 콘센트 ### {device_id}번, 상태: {power_text}, 자동대기전력차단값: {watt} x {ecomode_scailing_factor} W')
+                                    self.controller.state_updater.update_outlet_sync(device_id, power_text, None, watt * ecomode_scailing_factor, is_eco)
+
+                            elif device_name == 'Fan':
+                                power_pos = field_positions.get('power', 1)
+                                power = byte_data[int(power_pos)]
+                                power_values = state_structure['structure'][power_pos]['values']
+                                power_hex = byte_to_hex_str(power)
+                                power_text = "OFF" if power_hex == power_values.get('off', '').upper() else "ON"
+                                speed_pos = field_positions.get('speed', 3)
+                                speed = byte_data[int(speed_pos)]
+                                speed_values = state_structure['structure'][speed_pos]['values']
+                                speed_hex = byte_to_hex_str(speed)
+                                speed_text = speed_values.get(speed_hex, 'low')
+                                self.logger.signal(f'{byte_data.hex()}: 환기장치 ### {device_id}번, 상태: {power_text}, 속도: {speed_text}')
+                                self.controller.state_updater.update_fan_sync(device_id, power_text, speed_text)
+
+                            elif device_name == 'EV':
+                                power_pos = field_positions.get('power', 1)
+                                power = byte_data[int(power_pos)]
+                                power_values = state_structure['structure'][power_pos]['values']
+                                power_hex = byte_to_hex_str(power)
+                                power_text = "ON" if power_hex == power_values.get('on', '').upper() else "OFF"
+                                floor_pos = field_positions.get('floor', 3)
+                                floor = byte_data[int(floor_pos)]
+                                floor_hex = byte_to_hex_str(floor)
+                                self.logger.signal(f'{byte_data.hex()}: 엘리베이터 ### {device_id}번, 상태: {power_text}, 층: {floor_hex}')
+                                self.controller.state_updater.update_ev_sync(device_id, power_text, floor_hex)
+
+                            break
+                else:
+                    self.logger.signal(f'체크섬 불일치: {data}')
+
+        except Exception as e:
+            self.logger.error(f"Elfin 데이터 처리 중 오류 발생 (동기): {str(e)}")
+
+    async def process_elfin_data(self, raw_data: str) -> None:
+        """Elfin 장치에서 전송된 raw_data를 분석합니다."""
+        try:
+            assert isinstance(self.DEVICE_STRUCTURE, dict), "DEVICE_STRUCTURE must be a dictionary"
+
+            for k in range(0, len(raw_data), 16):
+                data = raw_data[k:k + 16]
+                if data == checksum(data):
+                    self.COLLECTDATA['recv_data'].append(data)
+                    self.COLLECTDATA['recent_recv_data'].add(data)
+                    if len(self.COLLECTDATA['recv_data']) > 300:
+                        self.COLLECTDATA['recv_data'] = self.COLLECTDATA['recv_data'][-300:]
+
+                    byte_data = bytearray.fromhex(data)
+
                     for device_name, structure in self.DEVICE_STRUCTURE.items():
                         state_structure = structure['state']
                         field_positions = state_structure['fieldPositions']
