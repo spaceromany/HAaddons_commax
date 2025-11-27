@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.6.13] - 2025-11-27
+
+### 개선됨
+- **반응 속도 대폭 개선** (Performance Fork)
+  - 명령 전송: MQTT 콜백에서 즉시 전송 (asyncio 루프 대기 제거)
+  - 상태 수신: 동기 처리로 변경하여 지연 제거
+  - `build_packet_sync()`, `process_elfin_data_sync()` 등 동기 처리 메서드 추가
+
+### 변경됨
+- `max_send_count` 기본값 30으로 변경
+- 저장소 정보 업데이트 (spaceromany/HAaddons_commax)
+
+## [1.6.12] - 2025-11-26
+
+### 개선됨
+- 명령 전송 속도 개선
+  - MQTT 콜백에서 직접 패킷 생성 및 전송
+  - asyncio 루프 대기 없이 즉시 처리
+
 ## [1.6.11] - 2025-03-21
 
 ### 수정됨
